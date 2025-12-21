@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Vector Database Management - Qdrant Integration
+Sistema: CREG Regulatory Document Automation
+Versión: 2.0 (SentenceTransformers - Sin API)
+
+CAMBIO:
+  - ANTES: Google Gemini API (embed_content, 768 dims, cuota → 0)
+  - AHORA: SentenceTransformers all-MiniLM-L6-v2 (384 dims, local)
+"""
+
+import os
+import logging
+from typing import List, Dict, Optional, Tuple, Any
+from dataclasses import dataclass
+from datetime import datetime
+import json
+
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    VectorParams,
+    Distance,
+    PointStruct,
+)
+
+# Logger básico (puedes integrarlo con tu logger central si ya lo tienes)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("vectordb_qdrant")
+
+
+@dataclass
+class SearchResult:
+    """Objeto de resultado de búsqueda semántica."""
+    document_id: Optional[str]
+    score: float
+    content: str
+    metadata: Dict[str, Any]
+    chunk_index: int
+
+
+class VectorDB:
+    """
+    Gestor de vectores sobre Qdrant usando SentenceTransformers.
+
+    - Genera embeddings localmente (sin API).
+    - Usa modelo all-MiniLM-L6-v2 → 384 dimensiones.
+    - Ofrece métodos para insertar documentos y hacer búsqueda semántica.
+    """
+
+    MODEL_NAME = "all-MiniLM-L6-v2"
+    EMBEDDING_DIM = 384
+    COLLECTION_NAME = "creg_documents"
+
+    def __init__(
+        self,
+        host: str = None,
+        port: int = None,
+        api_key: Optional[str] = None,
+        collection_name: str = None,
+    ):
+        # Leer config de entorno
+        host = host or os.getenv("QDRANT_HOST", "localhost")
+        port = port or int(os.getenv("QDRANT_PORT", "6333"))
+        api_key = api_key or os.getenv("QDRANT_API_KEY")
+        self.collection_name = collection_name or os.getenv(
+            "QDRANT_COLLECTION", self.COLLECTION_NAME
+        )
+
+        logger.info("🔌 Conectando a Qdrant en %s:%s ...", host, port)
+        self.client = QdrantClient(host=host, port=port, api_key=api_key, timeout=30.0)
+        logger.info("✅ Conexión a Qdrant OK")
+
+        logger.info("🤖 Cargando modelo SentenceTransformer '%s' ...", self.MODEL_NAME)
+        self.model = SentenceTransformer(self.MODEL_NAME)
+        logger.info("✅ Modelo cargado (%d dimensiones)", self.EMBEDDING_DIM)
+
+        self._ensure_collection_exists()
+
+    # ---------------------------------------------------------------------
+    # Inicialización de colección
+    # ---------------------------------------------------------------------
+    def _ensure_collection_exists(self) -> None:
+        """Crea la colección en Qdrant si no existe."""
+        try:
+            self.client.get_collection(self.collection_name)
+            logger.info("✅ Colección '%s' ya existe", self.collection_name)
+        except Exception:
+            logger.info(
+                "📁 Colección '%s' no existe, creando con %d dims ...",
+                self.collection_name,
+                self.EMBEDDING_DIM,
+            )
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.EMBEDDING_DIM,
+                    distance=Distance.COSINE,
+                ),
+            )
+            logger.info("✅ Colección '%s' creada", self.collection_name)
+
+    # ---------------------------------------------------------------------
+    # Embeddings (aquí reemplazamos embed_content de Gemini)
+    # ---------------------------------------------------------------------
+    def embed_text(self, text: str) -> List[float]:
+        """
+        Genera el embedding de un texto usando SentenceTransformers.
+
+        Reemplaza COMPLETAMENTE a genai.embed_content(...).
+
+        Args:
+            text: Texto completo (chunk) a vectorizar.
+
+        Returns:
+            Lista de floats (384 dimensiones).
+        """
+        if not isinstance(text, str):
+            raise ValueError("El texto debe ser str")
+
+        text = text.strip()
+        if not text:
+            raise ValueError("El texto está vacío")
+
+        # Opcional: truncar textos MUY grandes para evitar problemas de RAM
+        if len(text) > 50000:
+            logger.warning("Texto muy largo (%d chars), truncando a 50k", len(text))
+            text = text[:50000]
+
+        try:
+            vec = self.model.encode(
+                text,
+                convert_to_numpy=True,
+                normalize_embeddings=True,  # ideal para cosine
+            )
+            return vec.tolist()
+        except Exception as e:
+            logger.error("❌ Error generando embedding local: %s", e)
+            raise
+
+    # ---------------------------------------------------------------------
+    # Inserción de documentos
+    # ---------------------------------------------------------------------
+    def add_document(
+        self,
+        document_id: str,
+        content: str,
+        chunk_index: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Inserta un documento (chunk) en la colección.
+
+        Args:
+            document_id: ID del documento o de la norma.
+            content: Texto del chunk.
+            chunk_index: índice del chunk dentro del documento.
+            metadata: dict con campos extra (título, año, url, etc).
+
+        Returns:
+            True si se insertó correctamente.
+        """
+        try:
+            embedding = self.embed_text(content)
+
+            payload = {
+                "document_id": document_id,
+                "chunk_index": chunk_index,
+                "text": content[:500],  # preview
+                "content_length": len(content),
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            if metadata:
+                payload.update(metadata)
+
+            point_id = abs(hash(f"{document_id}-{chunk_index}")) % (10**9)
+
+            point = PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload=payload,
+            )
+
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[point],
+                wait=True,
+            )
+
+            logger.info(
+                "✅ Insertado en Qdrant doc_id=%s chunk=%s", document_id, chunk_index
+            )
+            return True
+        except Exception as e:
+            logger.error("❌ Error insertando documento en Qdrant: %s", e)
+            return False
+
+    def add_documents(self, docs: List[Dict[str, Any]]) -> Tuple[int, int]:
+        """
+        Inserta múltiples documentos/chunks en batch.
+
+        docs: lista de dicts con llaves:
+            - id (str) → document_id
+            - content (str)
+            - chunk_index (int, opcional)
+            - metadata (dict, opcional)
+        """
+        ok, fail = 0, 0
+        for i, d in enumerate(docs, 1):
+            success = self.add_document(
+                document_id=d["id"],
+                content=d["content"],
+                chunk_index=d.get("chunk_index", 0),
+                metadata=d.get("metadata"),
+            )
+            if success:
+                ok += 1
+            else:
+                fail += 1
+            if i % 10 == 0:
+                logger.info("Progreso inserción: %d/%d", i, len(docs))
+        logger.info("✅ Inserción batch completada: %d OK, %d FAIL", ok, fail)
+        return ok, fail
+
+    # ---------------------------------------------------------------------
+    # Búsqueda semántica
+    # ---------------------------------------------------------------------
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        score_threshold: float = 0.0,
+    ) -> List[SearchResult]:
+        """
+        Realiza búsqueda semántica en Qdrant.
+
+        Args:
+            query: texto de la consulta.
+            limit: número máximo de resultados.
+            score_threshold: mínimo score (0-1) para considerar un resultado.
+
+        Returns:
+            Lista de SearchResult ordenados por score desc.
+        """
+        try:
+            q_vec = self.embed_text(query)
+            hits = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=q_vec,
+                limit=limit,
+            )
+            results: List[SearchResult] = []
+            for h in hits:
+                if h.score < score_threshold:
+                    continue
+                p = h.payload or {}
+                results.append(
+                    SearchResult(
+                        document_id=p.get("document_id"),
+                        score=h.score,
+                        content=p.get("text", ""),
+                        metadata=p,
+                        chunk_index=int(p.get("chunk_index", 0)),
+                    )
+                )
+            logger.info(
+                "🔍 Query='%s' → %d resultados (limit=%d)",
+                query,
+                len(results),
+                limit,
+            )
+            return results
+        except Exception as e:
+            logger.error("❌ Error en búsqueda semántica: %s", e)
+            return []
+
+    # ---------------------------------------------------------------------
+    # Utilidades
+    # ---------------------------------------------------------------------
+    def get_stats(self) -> Dict[str, Any]:
+        """Devuelve estadísticas básicas de la colección."""
+        try:
+            col = self.client.get_collection(self.collection_name)
+            return {
+                "collection_name": self.collection_name,
+                "points_count": col.points_count,
+                "vector_size": self.EMBEDDING_DIM,
+                "distance": "cosine",
+                "model": self.MODEL_NAME,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        except Exception as e:
+            logger.error("❌ Error obteniendo stats de Qdrant: %s", e)
+            return {}
+
+    def health_check(self) -> bool:
+        """Comprueba si Qdrant responde correctamente."""
+        try:
+            self.client.get_collections()
+            logger.info("✅ Health check Qdrant OK")
+            return True
+        except Exception as e:
+            logger.error("❌ Health check Qdrant FAIL: %s", e)
+            return False
+
+
+# -------------------------------------------------------------------------
+# PRUEBA RÁPIDA (puedes ejecutar: python src/vectordb_qdrant.py)
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    vdb = VectorDB()
+    vdb.health_check()
+
+    # Insertar un ejemplo de prueba
+    vdb.add_document(
+        document_id="TEST-001",
+        content="Artículo 1. La CREG regula los servicios de energía eléctrica en Colombia.",
+        chunk_index=0,
+        metadata={"type": "Resolución", "year": 2024},
+    )
+
+    # Buscar
+    results = vdb.search("regulación de energía eléctrica", limit=3)
+    for r in results:
+        print("\n---")
+        print(f"Score: {r.score:.4f}")
+        print(f"Doc: {r.document_id}")
+        print(f"Texto: {r.content[:120]}...")
+
+    print("\nStats:", json.dumps(vdb.get_stats(), indent=2, ensure_ascii=False))
