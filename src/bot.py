@@ -73,8 +73,17 @@ class CREGBot:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         try:
-            # Ahora la llamada es asíncrona y soporta múltiples usuarios sin bloquear
             result = await self.agent.answer(user_message)
+            
+            if result.get("ambiguo"):
+                opciones = result.get("opciones", [])
+                msg = "🔍 *He encontrado varias opciones:* \n\n"
+                for i, opt in enumerate(opciones, 1):
+                    msg += f"{i}. Resolución *{opt['normanumero']}* de *{opt['año']}*\n"
+                msg += "\nPor favor, sé más específico (ej: _'háblame de la resolución 67 de 1995'_)."
+                await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
+                return
+
             respuesta = result.get("respuesta", "")
             normas = result.get("normas_usadas", [])
 

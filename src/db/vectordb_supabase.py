@@ -58,29 +58,48 @@ class VectorDBSupabase:
             logger.error(f"❌ Error generando embedding OpenAI: {e}")
             return None
 
-    async def search_by_text(self, query: str, limit: int = 3) -> List[Dict]:
+    async def search_by_text(self, query: str, limit: int = 5) -> List[Dict]:
         """
-        Búsqueda por texto exacto (número de resolución) para mejorar precisión.
+        Búsqueda por texto exacto (número y año) para mejorar precisión.
         """
-        match = re.search(r"(\d{1,5})", query)
-        if not match:
+        # Buscar todos los números en el mensaje
+        nums = re.findall(r"\b(\d+)\b", query)
+        if not nums:
             return []
         
-        numero = match.group(1)
+        # Intentar identificar número de resolución y año
+        # El año suele ser el que está entre 1990-2026 o el que viene después de 'de', 'del'
+        numero = nums[0]
+        año = None
+        
+        for n in nums:
+            val = int(n)
+            # Años de 4 dígitos o años de 2 dígitos (90-99 o 00-26)
+            if 1990 <= val <= 2026:
+                año = str(val)
+            elif (90 <= val <= 99) or (0 <= val <= 26):
+                # Convertir 95 -> 1995, 24 -> 2024
+                año = str(1900 + val) if val >= 90 else str(2000 + val)
+
         try:
-            logger.info(f"🔎 Búsqueda textual por número: {numero}")
-            # Ejecutamos en thread para no bloquear el loop async
-            res = await asyncio.to_thread(
-                lambda: self.supabase.table("normas")
-                .select("id, numero, año, url, titulo")
-                .ilike("numero", f"%{numero}%")
-                .limit(limit)
-                .execute()
-            )
+            logger.info(f"🔎 Búsqueda textual: numero={numero}, año={año}")
+            
+            # Construir query base
+            query_builder = self.supabase.table("normas").select("id, numero, año, url, titulo")
+            
+            # Filtro por número (exacto o ilike si es corto)
+            if len(numero) >= 1:
+                query_builder = query_builder.ilike("numero", f"%{numero}")
+            
+            # Filtro por año si se detectó
+            if año:
+                query_builder = query_builder.eq("año", año)
+            
+            res = await asyncio.to_thread(lambda: query_builder.limit(limit).execute())
             
             results = []
             for row in res.data:
-                # Para cada norma encontrada por texto, traemos el primer chunk informativo
+                # Traer el primer chunk para contexto
                 chunks = await asyncio.to_thread(
                     lambda: self.supabase.table("chunks")
                     .select("texto, indice")
@@ -89,11 +108,11 @@ class VectorDBSupabase:
                     .execute()
                 )
                 
-                texto = chunks.data[0]["texto"] if chunks.data else "Documento encontrado por número sin fragmentos disponibles."
+                texto = chunks.data[0]["texto"] if chunks.data else "Documento encontrado."
                 
                 results.append({
                     "documento": texto[:300],
-                    "distancia": 0.0, # Máxima prioridad
+                    "distancia": 0.0,
                     "metadata": {
                         "norma_id": row["id"],
                         "normanumero": row.get("numero", "N/A"),
@@ -107,7 +126,7 @@ class VectorDBSupabase:
                 })
             return results
         except Exception as e:
-            logger.error(f"⚠️ Error en búsqueda textual: {e}")
+            logger.error(f"⚠️ Error en búsqueda textual avanzada: {e}")
             return []
 
     async def search_by_vector(

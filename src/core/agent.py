@@ -99,12 +99,31 @@ INSTRUCCIONES:
             return f"Error al procesar: {str(e)}"
 
     async def answer(self, user_question: str) -> Dict:
-        # Todo el pipeline es ahora awaitable
+        # 1. Búsqueda textual primero para ver si hay ambigüedad clara (mismo número, varios años)
+        text_matches = await self.vectordb.search_by_text(user_question)
+        
+        # Si hay más de una norma distinta por texto, enviamos opciones para desambiguar
+        unique_norms = {}
+        for m in text_matches:
+            meta = m["metadata"]
+            key = f"{meta['normanumero']} ({meta['año']})"
+            if key not in unique_norms:
+                unique_norms[key] = meta
+
+        if len(unique_norms) > 1:
+            return {
+                "ambiguo": True,
+                "opciones": list(unique_norms.values()),
+                "respuesta": "He encontrado varias resoluciones con ese número. ¿A cuál te refieres?",
+            }
+
+        # 2. Pipeline normal si no hay ambigüedad crítica
         normas = await self.search_normas(user_question, n_results=3)
         context = self.build_context(normas) if normas else "No hay normas disponibles."
         respuesta = await self.generate_response(user_question, context)
 
         return {
+            "ambiguo": False,
             "pregunta": user_question,
             "respuesta": respuesta,
             "normas_usadas": normas or [],
