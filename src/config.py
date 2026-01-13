@@ -25,9 +25,9 @@ TIMEZONE = os.getenv("TIMEZONE", "America/Bogota")
 
 # Validación mínima
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("[ERROR] TELEGRAM_BOT_TOKEN no configurado en .env")
+    raise ValueError(f"[ERROR] TELEGRAM_BOT_TOKEN no encontrado en el entorno de Railway ni en .env. Variables detectadas: {list(os.environ.keys())}")
 
 if not OPENAI_API_KEY:
-    raise ValueError("[ERROR] OPENAI_API_KEY no configurado en .env")
+    raise ValueError("[ERROR] OPENAI_API_KEY no encontrado.")
 
 print("[OK] Configuración cargada correctamente")
