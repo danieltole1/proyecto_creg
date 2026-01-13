@@ -45,7 +45,7 @@ class CREGBot:
             if normas:
                 msg += "\n\n📚 Normas consultadas:\n"
                 for n in normas:
-                    msg += f"- Resolución {n.get('norma_numero')} ({n.get('año')}) [{n.get('fuente', '')}]\n"
+                    msg += f"- Resolución {n.get('norma_numero')} ({n.get('año')})\n"
 
             # Telegram limita 4096 chars
             for i in range(0, len(msg), 4096):
