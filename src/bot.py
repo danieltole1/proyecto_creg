@@ -1,7 +1,9 @@
 ﻿#!/usr/bin/env python3
 # src/bot.py
 import logging
-from telegram import Update
+import asyncio
+import time
+from telegram import Update, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from src.config import TELEGRAM_BOT_TOKEN
@@ -12,6 +14,22 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# Configuración de Experiencia de Usuario
+SESSION_TIMEOUT = 3 * 3600  # 3 horas en segundos
+WELCOME_MSG = (
+    "🤖 *¡Bienvenido al Bot de Consulta CREG!* ⚖️\n\n"
+    "Soy tu asistente experto en la normativa de energía y gas en Colombia. "
+    "Puedo ayudarte a encontrar resoluciones y explicarte la regulación.\n\n"
+    "📖 *¿Cómo usarme?*\n"
+    "Simplemente escribe tu duda o el número de una resolución. Por ejemplo:\n"
+    "• _\"¿Cuál es la fórmula tarifaria de gas?\"_\n"
+    "• _\"Busca normas de 2024 sobre energía.\"_\n"
+    "• _\"Resolución 101-042\"_\n\n"
+    "💡 *Tip:* Soy proactivo buscando fuentes oficiales para mis respuestas."
+)
+
+HELP_TOAST = "👋 *¡Hola de nuevo!* Recuerda que puedes preguntarme sobre cualquier Resolución CREG o tema regulatorio de energía y gas."
 
 
 class CREGBot:
@@ -26,13 +44,32 @@ class CREGBot:
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("CREG Bot (Supabase + OpenAI). Escribe tu pregunta.")
+        # Al usar /start, reseteamos el cronómetro de sesión
+        context.user_data["last_interaction"] = time.time()
+        await update.message.reply_text(WELCOME_MSG, parse_mode=constants.ParseMode.MARKDOWN)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Escribe tu pregunta sobre normas CREG y te respondo con fuentes.")
+        await update.message.reply_text(WELCOME_MSG, parse_mode=constants.ParseMode.MARKDOWN)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_message = update.message.text
+        now = time.time()
+        last_interaction = context.user_data.get("last_interaction")
+
+        # Lógica de Sesión: Mostrar recordatorio si han pasado > 3 horas o es primera vez
+        if last_interaction is None or (now - last_interaction) > SESSION_TIMEOUT:
+            # Si es un mensaje muy corto (hola, etc), enviamos el mensaje de bienvenida completo
+            if len(user_message.strip()) < 5:
+                await update.message.reply_text(WELCOME_MSG, parse_mode=constants.ParseMode.MARKDOWN)
+                context.user_data["last_interaction"] = now
+                return
+            
+            # Si es una pregunta, enviamos un pequeño saludo previo
+            await update.message.reply_text(HELP_TOAST, parse_mode=constants.ParseMode.MARKDOWN)
+
+        # Actualizar timestamp de interacción
+        context.user_data["last_interaction"] = now
+
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         try:
