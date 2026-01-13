@@ -1,10 +1,11 @@
 ﻿#!/usr/bin/env python3
+# src/bot.py
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from src.config import TELEGRAM_BOT_TOKEN
-from src.agent import CREGAgent
+from src.core.agent import CREGAgent
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -35,7 +36,8 @@ class CREGBot:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         try:
-            result = self.agent.answer(user_message)
+            # Ahora la llamada es asíncrona y soporta múltiples usuarios sin bloquear
+            result = await self.agent.answer(user_message)
             respuesta = result.get("respuesta", "")
             normas = result.get("normas_usadas", [])
 
@@ -43,7 +45,7 @@ class CREGBot:
             if normas:
                 msg += "\n\n📚 Normas consultadas:\n"
                 for n in normas:
-                    msg += f"- Resolución {n.get('norma_numero')} ({n.get('año')})\n"
+                    msg += f"- Resolución {n.get('norma_numero')} ({n.get('año')}) [{n.get('fuente', '')}]\n"
 
             # Telegram limita 4096 chars
             for i in range(0, len(msg), 4096):
@@ -54,7 +56,7 @@ class CREGBot:
             await update.message.reply_text("❌ Error interno. Intenta de nuevo.")
 
     def run(self):
-        logger.info("🤖 Bot CREG iniciando...")
+        logger.info("🤖 Bot CREG iniciando (Async Ready)...")
         self.app.run_polling()
 
 

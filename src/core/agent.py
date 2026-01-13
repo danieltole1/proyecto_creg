@@ -1,35 +1,36 @@
-# src/agent.py
+# src/core/agent.py
 """
-Agente que integra Supabase (pgvector) + OpenAI (GPT)
+Agente que integra Supabase (Hybrid Search) + OpenAI (GPT) - Versión Async
 """
 
 import logging
 from typing import List, Dict, Optional
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from src.config import OPENAI_API_KEY, OPENAI_MODEL
-from src.vectordb_supabase import VectorDBSupabase
+from src.db.vectordb_supabase import VectorDBSupabase
 
 logger = logging.getLogger(__name__)
 
 
 class CREGAgent:
     """
-    Pipeline:
-    1) Busca chunks relevantes en Supabase (RPC match_chunks)
+    Pipeline Async:
+    1) Busca chunks relevantes en Supabase (Hybrid Search: Texto + Vector)
     2) Construye contexto
-    3) Genera respuesta con OpenAI
+    3) Genera respuesta con OpenAI (Async)
     """
 
     def __init__(self):
         self.vectordb = VectorDBSupabase()
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         self.model = OPENAI_MODEL
-        logger.info("✅ Agent inicializado (Supabase + OpenAI)")
+        logger.info("✅ Agent inicializado (Async Pipeline)")
 
-    def search_normas(self, query: str, n_results: int = 3) -> Optional[List[Dict]]:
-        results = self.vectordb.search(query, n_results=n_results, threshold=0.4)
+    async def search_normas(self, query: str, n_results: int = 3) -> Optional[List[Dict]]:
+        # La búsqueda ahora es asíncrona e híbrida
+        results = await self.vectordb.search(query, n_results=n_results, threshold=0.4)
         if not results:
             return None
 
@@ -47,6 +48,7 @@ class CREGAgent:
                     "norma_numero": meta.get("normanumero"),
                     "año": meta.get("año"),
                     "url": meta.get("url"),
+                    "fuente": meta.get("fuente", "desconocida")
                 }
             )
         return normas
@@ -58,15 +60,16 @@ class CREGAgent:
         context = "NORMAS RELEVANTES ENCONTRADAS EN CREG:\n\n"
         for n in normas:
             context += f"[{n['rank']}] Resolución {n['norma_numero']} ({n['año']})\n"
-            context += f" Similitud: {n['similitud']*100:.1f}%\n"
+            context += f" Similitud/Relevancia: {n['similitud']*100:.1f}%\n"
             context += f" Fragmento: {n['fragmento']}...\n"
             context += f" URL: {n['url']}\n\n"
         return context
 
-    def generate_response(self, user_question: str, context: str) -> str:
+    async def generate_response(self, user_question: str, context: str) -> str:
         system_prompt = (
             "Eres un asistente experto en regulación de energía y gas en Colombia (CREG). "
-            "Responde en español, claro y conciso. Máximo 500 palabras."
+            "Responde en español, claro y conciso. Máximo 500 palabras. "
+            "Si encuentras una norma por búsqueda textual exacta, dale prioridad."
         )
 
         user_prompt = f"""CONTEXTO DE NORMAS RELEVANTES:
@@ -82,7 +85,7 @@ INSTRUCCIONES:
 """
 
         try:
-            resp = self.client.chat.completions.create(
+            resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -95,13 +98,16 @@ INSTRUCCIONES:
             logger.error(f"❌ Error con OpenAI: {e}")
             return f"Error al procesar: {str(e)}"
 
-    def answer(self, user_question: str) -> Dict:
-        normas = self.search_normas(user_question, n_results=3)
+    async def answer(self, user_question: str) -> Dict:
+        # Todo el pipeline es ahora awaitable
+        normas = await self.search_normas(user_question, n_results=3)
         context = self.build_context(normas) if normas else "No hay normas disponibles."
-        respuesta = self.generate_response(user_question, context)
+        respuesta = await self.generate_response(user_question, context)
 
         return {
             "pregunta": user_question,
             "respuesta": respuesta,
             "normas_usadas": normas or [],
         }
+
+# ============ FIN src/core/agent.py ============
